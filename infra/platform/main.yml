@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Root stack of the delivery photos lab platform. It holds no resources of its own:
+  it nests five stacks and wires each one's outputs into the next, so the order
+  and the connections between the parts are readable in one place.
+    network  -> VPC, public / private app / private DB subnets in two AZs, VPC endpoints
+    security -> security groups and the ECS roles
+    storage  -> photos bucket, replica bucket in the second Region, CloudFront, signing key
+    database -> RDS for PostgreSQL, Multi-AZ, private
+    service  -> load balancer and the ECS Fargate service
+  The nested templates live in infra/platform/stacks/. CloudFormation reads nested
+  templates from S3, so the publish-templates workflow uploads them to the template
+  bucket (artifacts stack) and sets TemplatesVersion in deployment.yaml; that
+  commit is what Git sync deploys.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  TemplatesVersion:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{40}$"
+    Description: Folder in the template bucket holding the nested templates (Git tree hash of infra/platform/stacks).
+  OwnerName:
+    Type: String
+    Description: Shown on the about page and used in tags.
+  ReplicaRegion:
+    Type: String
+    Default: eu-central-1
+
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/network.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-photos-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+
+  Security:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/security.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-photos-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt Network.Outputs.VpcId
+
+  Storage:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/storage.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-photos-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+        OwnerName: !Ref OwnerName
+        TaskRoleName: !GetAtt Security.Outputs.TaskRoleName
+        ReplicaRegion: !Ref ReplicaRegion
+
+  Database:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/database.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-photos-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+        DbSubnetIds: !GetAtt Network.Outputs.DbSubnetIds
+        DbSecurityGroupId: !GetAtt Security.Outputs.DbSecurityGroupId
+
+  Service:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - "https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${TemplatesVersion}/service.yaml"
+        - Bucket: !ImportValue { "Fn::Sub": "onward-${Environment}-photos-template-bucket" }
+      Parameters:
+        Environment: !Ref Environment
+        OwnerName: !Ref OwnerName
+        VpcId: !GetAtt Network.Outputs.VpcId
+        PublicSubnetIds: !GetAtt Network.Outputs.PublicSubnetIds
+        AppSubnetIds: !GetAtt Network.Outputs.AppSubnetIds
+        AlbSecurityGroupId: !GetAtt Security.Outputs.AlbSecurityGroupId
+        TaskSecurityGroupId: !GetAtt Security.Outputs.TaskSecurityGroupId
+        TaskExecutionRoleArn: !GetAtt Security.Outputs.TaskExecutionRoleArn
+        TaskRoleArn: !GetAtt Security.Outputs.TaskRoleArn
+        RepositoryUri: !ImportValue { "Fn::Sub": "onward-${Environment}-photos-repository-uri" }
+        PhotosBucketName: !GetAtt Storage.Outputs.PhotosBucketName
+        CdnDomain: !GetAtt Storage.Outputs.CdnDomain
+        SigningKeyId: !GetAtt Storage.Outputs.SigningKeyId
+        SigningKeySecretArn: !GetAtt Storage.Outputs.SigningKeySecretArn
+        DbEndpoint: !GetAtt Database.Outputs.DbEndpoint
+        DbName: !GetAtt Database.Outputs.DbName
+        DbUser: !GetAtt Database.Outputs.DbUser
+        DbSecretArn: !GetAtt Database.Outputs.DbSecretArn
+
+Outputs:
+  AppUrl:
+    Description: The single public address of the photo service.
+    Value: !GetAtt Service.Outputs.AppUrl
+  CdnDomain:
+    Value: !GetAtt Storage.Outputs.CdnDomain
+  PhotosBucketName:
+    Value: !GetAtt Storage.Outputs.PhotosBucketName
+  ReplicaBucketName:
+    Value: !GetAtt Storage.Outputs.ReplicaBucketName

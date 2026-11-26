@@ -1,0 +1,15 @@
+# Deployed by CloudFormation Git sync to stack onward-dev-photos-platform (the root of the
+# nested network, security, storage, database and service stacks).
+# TemplatesVersion is written by .github/workflows/publish-templates.yml (or, on a first
+# build, by scripts/hooks/before-platform.sh) after the nested templates are uploaded to the
+# template bucket: do not edit it by hand.
+template-file-path: infra/platform/main.yml
+parameters:
+  Environment: dev
+  OwnerName: Gabriel Anyaele
+  ReplicaRegion: eu-central-1
+  TemplatesVersion: 0000000000000000000000000000000000000000
+tags:
+  Project: onward
+  Owner: Gabriel Anyaele
+  Environment: dev
