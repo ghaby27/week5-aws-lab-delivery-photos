@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Service stack (nested in the platform root) for the delivery photos lab: the
+  internet-facing Application Load Balancer (the single public entry point) and the
+  ECS Fargate service running the photo app, two tasks spread over the private app
+  subnets of two Availability Zones. If a task or a zone is lost, the load balancer
+  sends traffic to the other task and ECS starts a replacement.
+  Releases: GitHub Actions pushes a new :latest image and asks ECS for a new
+  deployment, which replaces the tasks one at a time and rolls back on failure.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  OwnerName:
+    Type: String
+  LabName:
+    Type: String
+    Default: Storing and Serving Delivery Photos for Onward Logistics
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  AppSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  TaskSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  TaskExecutionRoleArn:
+    Type: String
+  TaskRoleArn:
+    Type: String
+  RepositoryUri:
+    Type: String
+  PhotosBucketName:
+    Type: String
+  CdnDomain:
+    Type: String
+  SigningKeyId:
+    Type: String
+  SigningKeySecretArn:
+    Type: String
+  DbEndpoint:
+    Type: String
+  DbName:
+    Type: String
+  DbUser:
+    Type: String
+  DbSecretArn:
+    Type: String
+  DesiredTasks:
+    Type: Number
+    Default: 2
+    Description: One task per Availability Zone.
+  SignedUrlMinutes:
+    Type: Number
+    Default: 5
+  AppPort:
+    Type: Number
+    Default: 8080
+
+Resources:
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "onward-${Environment}-photos-alb"
+      Type: application
+      Scheme: internet-facing
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroupId]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "onward-${Environment}-photos-tg"
+      VpcId: !Ref VpcId
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref AppPort
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/onward/${Environment}/photos/app"
+      RetentionInDays: 14
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "onward-${Environment}-photos"
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "onward-${Environment}-photos"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "256"
+      Memory: "512"
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !Ref TaskExecutionRoleArn
+      TaskRoleArn: !Ref TaskRoleArn
+      ContainerDefinitions:
+        - Name: photos
+          Image: !Sub "${RepositoryUri}:latest"
+          Essential: true
+          PortMappings: [{ ContainerPort: !Ref AppPort, Protocol: tcp }]
+          Environment:
+            - { Name: OWNER_NAME, Value: !Ref OwnerName }
+            - { Name: LAB_NAME, Value: !Ref LabName }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: PHOTOS_BUCKET, Value: !Ref PhotosBucketName }
+            - { Name: CDN_DOMAIN, Value: !Ref CdnDomain }
+            - { Name: SIGNING_KEY_ID, Value: !Ref SigningKeyId }
+            - { Name: SIGNED_URL_MINUTES, Value: !Ref SignedUrlMinutes }
+            - { Name: DB_HOST, Value: !Ref DbEndpoint }
+            - { Name: DB_NAME, Value: !Ref DbName }
+            - { Name: DB_USER, Value: !Ref DbUser }
+          # Read by ECS from Secrets Manager when the task starts; never in code or Git.
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "${DbSecretArn}:password::" }
+            - { Name: SIGNING_PRIVATE_KEY, ValueFrom: !Ref SigningKeySecretArn }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: photos
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: !Sub "onward-${Environment}-photos"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredTasks
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref AppSubnetIds
+          SecurityGroups: [!Ref TaskSecurityGroupId]
+      LoadBalancers:
+        - ContainerName: photos
+          ContainerPort: !Ref AppPort
+          TargetGroupArn: !Ref TargetGroup
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+
+Outputs:
+  AppUrl:
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
