@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Network stack, nested in the platform root, for the delivery photos lab: a VPC
+  across two Availability Zones with three tiers.
+    public       the load balancer only (route to the internet gateway)
+    private app  the containers: no NAT, no default route; AWS services through VPC endpoints
+    private db   the database: local routes only, nothing else
+  So the database cannot be reached from the internet, and the containers reach
+  S3, ECR, CloudWatch Logs and Secrets Manager without leaving AWS's network.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+
+Mappings:
+  Cidr:
+    Vpc: { Block: 10.40.0.0/16 }
+    Public: { A: 10.40.0.0/24, B: 10.40.1.0/24 }
+    App: { A: 10.40.10.0/24, B: 10.40.11.0/24 }
+    Db: { A: 10.40.20.0/24, B: 10.40.21.0/24 }
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [Cidr, Vpc, Block]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true   # needed for private DNS on the interface endpoints
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-vpc" }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-igw" }]
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # ---------------------------------------------------------------------------
+  # Public subnets: the load balancer only
+  # ---------------------------------------------------------------------------
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !FindInMap [Cidr, Public, A]
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-public-a" }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !FindInMap [Cidr, Public, B]
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-public-b" }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-public-rt" }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRouteTable }
+
+  PublicSubnetBRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnetB, RouteTableId: !Ref PublicRouteTable }
+
+  # ---------------------------------------------------------------------------
+  # Private app subnets: the containers. Local routes + S3 gateway endpoint only.
+  # ---------------------------------------------------------------------------
+  AppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !FindInMap [Cidr, App, A]
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-app-a" }]
+
+  AppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !FindInMap [Cidr, App, B]
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-app-b" }]
+
+  AppRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-app-rt" }]
+
+  AppSubnetARouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref AppSubnetA, RouteTableId: !Ref AppRouteTable }
+
+  AppSubnetBRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref AppSubnetB, RouteTableId: !Ref AppRouteTable }
+
+  # ---------------------------------------------------------------------------
+  # Private DB subnets: the database. Local routes only.
+  # ---------------------------------------------------------------------------
+  DbSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !FindInMap [Cidr, Db, A]
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-db-a" }]
+
+  DbSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !FindInMap [Cidr, Db, B]
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-db-b" }]
+
+  DbRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-db-rt" }]
+
+  DbSubnetARouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DbSubnetA, RouteTableId: !Ref DbRouteTable }
+
+  DbSubnetBRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DbSubnetB, RouteTableId: !Ref DbRouteTable }
+
+  # ---------------------------------------------------------------------------
+  # VPC endpoints (instead of a NAT gateway), in the app subnets
+  # ---------------------------------------------------------------------------
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-photos-endpoints-sg"
+      GroupDescription: HTTPS from the app subnets to the interface endpoints
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !FindInMap [Cidr, App, A], Description: app subnet a }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !FindInMap [Cidr, App, B], Description: app subnet b }
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-endpoints-sg" }]
+
+  # Image pulls: the ECR API (sign-in, manifests) and the Docker registry endpoint.
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref AppSubnetA, !Ref AppSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  EcrDockerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref AppSubnetA, !Ref AppSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  # Container logs (awslogs driver).
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref AppSubnetA, !Ref AppSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  # ECS reads the database password and the CloudFront signing key when a task starts.
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref AppSubnetA, !Ref AppSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  # Free gateway endpoint: ECR's image layers, and the photos bucket. Nothing else in S3.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref AppRouteTable]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EcrImageLayers
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "arn:${AWS::Partition}:s3:::prod-${AWS::Region}-starport-layer-bucket/*"
+          - Sid: PhotosBucket
+            Effect: Allow
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::onward-${Environment}-photos-${AWS::AccountId}"
+              - !Sub "arn:${AWS::Partition}:s3:::onward-${Environment}-photos-${AWS::AccountId}/*"
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  PublicSubnetIds:
+    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+  AppSubnetIds:
+    Value: !Join [",", [!Ref AppSubnetA, !Ref AppSubnetB]]
+  DbSubnetIds:
+    Value: !Join [",", [!Ref DbSubnetA, !Ref DbSubnetB]]

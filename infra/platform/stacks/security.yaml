@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Security stack (nested in the platform root) for the delivery photos lab: the
+  security groups that make the load balancer the only thing reachable from the
+  internet and the database reachable from the app only, and the two ECS roles.
+  No inline policies: an AWS managed policy where one fits, customer managed
+  policies scoped to this lab's resources otherwise. The task role's photo bucket
+  policy is in the storage stack, next to the bucket.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+Resources:
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-photos-alb-sg"
+      GroupDescription: Public HTTP to the load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: customers }
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-alb-sg" }]
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-photos-task-sg"
+      GroupDescription: App port from the load balancer only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, SourceSecurityGroupId: !Ref AlbSecurityGroup, Description: load balancer }
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-task-sg" }]
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-photos-db-sg"
+      GroupDescription: PostgreSQL from the app tasks only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref TaskSecurityGroup, Description: app tasks }
+      Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-db-sg" }]
+
+  # ECS itself: pull the image, write logs, and read the two secrets it injects
+  # into the container (DB password, CloudFront signing key).
+  TaskSecretsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-photos-task-secrets"
+      Description: Read the photo app's secrets at task start, nothing else.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              # RDS names the secret it manages rds!db-<id>; the signing key secret is ours.
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!db-*"
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:onward-${Environment}-photos-cloudfront-key-*"
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-photos-task-execution"
+      Description: Lets ECS pull the photo app image, send its logs and inject its secrets.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+        - !Ref TaskSecretsPolicy
+
+  # The app's own identity. The storage stack attaches the photo bucket policy to it.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-photos-task"
+      Description: Assumed by the photo app containers to read and write photos.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+
+Outputs:
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+  TaskSecurityGroupId:
+    Value: !Ref TaskSecurityGroup
+  DbSecurityGroupId:
+    Value: !Ref DbSecurityGroup
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+  TaskRoleName:
+    Value: !Ref TaskRole
