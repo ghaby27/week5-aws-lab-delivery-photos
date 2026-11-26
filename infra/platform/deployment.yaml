@@ -8,7 +8,7 @@ parameters:
   Environment: dev
   OwnerName: Gabriel Anyaele
   ReplicaRegion: eu-central-1
-  TemplatesVersion: 0000000000000000000000000000000000000000
+  TemplatesVersion: b7a397402d1a459f7daeaac660e9fbd4e7619e84
 tags:
   Project: onward
   Owner: Gabriel Anyaele
