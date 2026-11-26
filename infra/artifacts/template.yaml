@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Artifacts layer for the delivery photos lab, deployed before the platform: where
+  built things are stored, and the identities allowed to use them.
+  - The private ECR repository GitHub Actions pushes the photo app image to.
+  - The S3 bucket holding the platform's nested stack templates. CloudFormation
+    reads nested templates from S3 only, so the infra repository's workflow
+    publishes them here and Git sync deploys the root stack that points at them.
+  - The two roles a self-managed StackSet needs, so the platform can create the
+    replica photo bucket in the second Region from this Region's Git sync.
+  GitHub Actions signs in through OIDC: no stored credentials. This stack is
+  standalone (not nested) because the platform needs all of it to exist first.
+  No inline policies: every permission is a customer managed policy.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  AppRepositorySubject:
+    Type: String
+    Description: >-
+      The app repository as GitHub writes it in the OIDC token subject: owner@owner-id/repo@repo-id.
+      The numeric IDs never change, so a deleted and re-created repository with the same name
+      cannot assume the role.
+  InfraRepositorySubject:
+    Type: String
+    Description: This infrastructure repository, in the same form.
+  ReplicaRegion:
+    Type: String
+    Default: eu-central-1
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Container images
+  # ---------------------------------------------------------------------------
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "onward-${Environment}-photos"
+      # Mutable so "latest" can move; every image is also tagged with its commit SHA.
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true   # a teardown removes the images too
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep the last 10 images",
+              "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10 },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  # Push images, then tell ECS to start tasks from the new "latest" image.
+  GitHubReleasePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-photos-github-release"
+      Description: Push the photo app image and roll the photo app service, nothing else.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+          - Sid: PushPhotoAppImages
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:CompleteLayerUpload
+              - ecr:InitiateLayerUpload
+              - ecr:PutImage
+              - ecr:UploadLayerPart
+            Resource: !GetAtt Repository.Arn
+          - Sid: RollPhotoAppService
+            Effect: Allow
+            Action: [ecs:UpdateService, ecs:DescribeServices]
+            Resource: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/onward-${Environment}-photos/onward-${Environment}-photos"
+
+  GitHubReleaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-photos-github-release"
+      Description: Assumed by the app repository's GitHub Actions release workflow through OIDC.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !ImportValue onward-github-oidc-provider-arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # Only the main branch, or a build-* tag pushed by the deploy hook.
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${AppRepositorySubject}:ref:refs/heads/main"
+                  - !Sub "repo:${AppRepositorySubject}:ref:refs/tags/build-*"
+      ManagedPolicyArns: [!Ref GitHubReleasePolicy]
+
+  # ---------------------------------------------------------------------------
+  # Nested stack templates
+  # ---------------------------------------------------------------------------
+  # One folder per template version, named after the content of infra/platform/stacks/
+  # (its Git tree hash), so a version never changes once published.
+  TemplateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "onward-${Environment}-photos-templates-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+
+  TemplatePublishPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-photos-templates-publish"
+      Description: Upload the platform's nested stack templates, nothing else.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ListTemplates
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt TemplateBucket.Arn
+          - Sid: PublishTemplates
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject]
+            Resource: !Sub "${TemplateBucket.Arn}/*"
+
+  TemplatePublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-photos-templates-publish"
+      Description: Assumed by this repository's publish-templates workflow through OIDC.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !ImportValue onward-github-oidc-provider-arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${InfraRepositorySubject}:ref:refs/heads/main"
+      ManagedPolicyArns: [!Ref TemplatePublishPolicy]
+
+  # ---------------------------------------------------------------------------
+  # StackSet roles (self-managed permissions, one account)
+  # ---------------------------------------------------------------------------
+  # Git sync deploys in this Region only. The storage stack holds a StackSet that
+  # creates the replica bucket in ReplicaRegion: CloudFormation assumes the
+  # administration role, which may only assume the execution role, which may only
+  # manage the replica stack and its bucket. They live here so they exist (and IAM
+  # has propagated them) before the platform first creates the StackSet.
+  StackSetAdminPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-photos-stackset-admin"
+      Description: Let the photo replica StackSet hand its work to the execution role.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/onward-${Environment}-photos-stackset-exec"
+
+  StackSetAdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-photos-stackset-admin"
+      Description: Assumed by CloudFormation to run the photo replica StackSet.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+      ManagedPolicyArns: [!Ref StackSetAdminPolicy]
+
+  StackSetExecPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-photos-stackset-exec"
+      Description: Create and delete the replica photo bucket stack in the replica Region, nothing else.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReplicaStack
+            Effect: Allow
+            Action: cloudformation:*
+            Resource: !Sub "arn:${AWS::Partition}:cloudformation:${ReplicaRegion}:${AWS::AccountId}:stack/StackSet-onward-${Environment}-photos-replica-*"
+          - Sid: ReplicaBucket
+            Effect: Allow
+            Action: s3:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::onward-${Environment}-photos-replica-${AWS::AccountId}"
+              - !Sub "arn:${AWS::Partition}:s3:::onward-${Environment}-photos-replica-${AWS::AccountId}/*"
+          - Sid: StackSetNotifications
+            Effect: Allow
+            Action: sns:Publish
+            Resource: "*"
+
+  StackSetExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-photos-stackset-exec"
+      Description: Assumed by the StackSet administration role to deploy the replica bucket.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !GetAtt StackSetAdminRole.Arn }
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Ref StackSetExecPolicy]
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+    Export: { Name: !Sub "onward-${Environment}-photos-repository-uri" }
+  TemplateBucketName:
+    Value: !Ref TemplateBucket
+    Export: { Name: !Sub "onward-${Environment}-photos-template-bucket" }
+  StackSetAdminRoleArn:
+    Value: !GetAtt StackSetAdminRole.Arn
+    Export: { Name: !Sub "onward-${Environment}-photos-stackset-admin-role-arn" }
+  StackSetExecRoleName:
+    Value: !Ref StackSetExecRole
+    Export: { Name: !Sub "onward-${Environment}-photos-stackset-exec-role-name" }
+  GitHubReleaseRoleArn:
+    Value: !GetAtt GitHubReleaseRole.Arn
+  TemplatePublishRoleArn:
+    Value: !GetAtt TemplatePublishRole.Arn

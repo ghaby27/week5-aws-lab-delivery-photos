@@ -1,0 +1,12 @@
+# Deployed by CloudFormation Git sync to stack onward-dev-photos-artifacts.
+template-file-path: infra/artifacts/template.yaml
+parameters:
+  Environment: dev
+  # owner@owner-id/repo@repo-id, as GitHub writes them in the OIDC token subject.
+  AppRepositorySubject: ghaby27@332540436/week5-aws-lab-delivery-photos-app@1472677608
+  InfraRepositorySubject: ghaby27@332540436/week5-aws-lab-delivery-photos@1472676655
+  ReplicaRegion: eu-central-1
+tags:
+  Project: onward
+  Owner: Gabriel Anyaele
+  Environment: dev
