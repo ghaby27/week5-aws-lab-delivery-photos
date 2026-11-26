@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Database stack (nested in the platform root) for the delivery photos lab: Amazon
+  RDS for PostgreSQL holding each photo's details and its S3 key (never the photo).
+  - Private: DB subnets with local routes only, no public address, port 5432 open
+    to the app's security group only.
+  - Highly available: Multi-AZ, a synchronous standby in the other zone.
+  - Recoverable: 7 days of automated backups (point-in-time restore), deletion
+    protection on.
+  - No password anywhere in code: RDS generates it and keeps it in Secrets Manager;
+    ECS injects it into the container at start.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  DbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  DbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  InstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+
+Resources:
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "onward-${Environment}-photos-db"
+      DBSubnetGroupDescription: Private DB subnets in two Availability Zones
+      SubnetIds: !Ref DbSubnetIds
+
+  # Lab teardown deletes it (scripts/hooks/before-teardown.sh turns deletion protection
+  # off first). In production this would be DeletionPolicy: Snapshot.
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "onward-${Environment}-photos-db"
+      Engine: postgres
+      EngineVersion: "17"
+      DBInstanceClass: !Ref InstanceClass
+      MultiAZ: true
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: photos
+      MasterUsername: onward
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroupId]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: "02:00-03:00"
+      PreferredMaintenanceWindow: "sun:03:30-sun:04:30"
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      AutoMinorVersionUpgrade: true
+
+Outputs:
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DbName:
+    Value: photos
+  DbUser:
+    Value: onward
+  DbSecretArn:
+    Description: Secret RDS manages for the master user (JSON with username and password).
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
