@@ -186,6 +186,18 @@ Resources:
             Action: s3:*
             Resource: [!GetAtt PhotosBucket.Arn, !Sub "${PhotosBucket.Arn}/*"]
             Condition: { Bool: { aws:SecureTransport: "false" } }
+          # Nobody else opens photos, admins included (an explicit deny beats their IAM
+          # s3:*): only CloudFront and the app read them. Admins can still list and manage
+          # objects; the root user can remove this policy in an emergency.
+          - Sid: OnlyCloudFrontAndAppReadPhotos
+            Effect: Deny
+            Principal: "*"
+            Action: [s3:GetObject, s3:GetObjectVersion]
+            Resource: !Sub "${PhotosBucket.Arn}/photos/*"
+            Condition:
+              StringNotEquals:
+                aws:PrincipalArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${TaskRoleName}"
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
 
   # The app: upload, soft-delete (adds a delete marker) and restore (copies an old
   # version back). It cannot remove versions, so it can never lose a photo for good.
