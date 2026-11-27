@@ -27,7 +27,7 @@ Resources:
     Properties:
       CidrBlock: !FindInMap [Cidr, Vpc, Block]
       EnableDnsSupport: true
-      EnableDnsHostnames: true   # needed for private DNS on the interface endpoints
+      EnableDnsHostnames: true
       Tags: [{ Key: Name, Value: !Sub "onward-${Environment}-photos-vpc" }]
 
   InternetGateway:
