@@ -43,7 +43,10 @@ Resources:
     Properties:
       DBInstanceIdentifier: !Sub "onward-${Environment}-photos-db"
       Engine: postgres
-      EngineVersion: "17"
+      # Pinned to the latest minor (a bare "18" gives the RDS default, 18.3). If RDS later
+      # applies a newer minor itself, raise this number to match before the next update.
+      EngineVersion: "18.7"
+      AllowMajorVersionUpgrade: true
       DBInstanceClass: !Ref InstanceClass
       MultiAZ: true
       AllocatedStorage: "20"
