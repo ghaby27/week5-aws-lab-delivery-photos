@@ -25,11 +25,14 @@ concurrency:
   group: publish-templates
   cancel-in-progress: false
 
+# Settings live in the repository, not here: Settings > Secrets and variables > Actions.
+#   secret   AWS_ROLE_ARN     role the workflow assumes through OIDC
+#   variable AWS_REGION       e.g. eu-west-1
+#   variable TEMPLATE_BUCKET  e.g. onward-dev-photos-templates-<account id>
 env:
-  AWS_REGION: eu-west-1
-  AWS_ROLE_ARN: arn:aws:iam::448049788660:role/onward-dev-photos-templates-publish
-  TEMPLATE_BUCKET: onward-dev-photos-templates-448049788660
-  DEPLOYMENT_FILE: infra/platform/deployment.yaml
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TEMPLATE_BUCKET: ${{ vars.TEMPLATE_BUCKET }}
+  DEPLOYMENT_FILE: infra/platform/deployment.yaml   # a path in this repository, not a setting
 
 jobs:
   publish:
@@ -42,7 +45,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Upload the nested templates
